@@ -9,6 +9,11 @@ export class ClientChannel {
   public maxMessageSize: number | undefined
   public userData = {}
 
+  // Client's local MediaStream
+  // - Will be sent to the WebRTC server which will forward the stream to other connected clients
+  // - Can be used to render a stream for the local client as well
+  public stream: MediaStream | undefined
+
   private peerConnection: PeerConnection
   private connectionsManager: ConnectionsManagerClient
   private url: string
@@ -21,11 +26,13 @@ export class ClientChannel {
     authorization: string | undefined,
     port: number | null,
     label: string,
-    rtcConfiguration: RTCConfiguration
+    rtcConfiguration: RTCConfiguration,
+    stream: MediaStream | undefined,
   ) {
     this.url = port ? `${url}:${port}` : url
-    this.connectionsManager = new ConnectionsManagerClient(this.url, authorization, label, rtcConfiguration)
+    this.connectionsManager = new ConnectionsManagerClient(this.url, authorization, label, rtcConfiguration, stream)
     this.bridge = this.connectionsManager.bridge
+    this.stream = stream
 
     // remove all event listeners on disconnect
     this.bridge.on(EVENTS.DISCONNECTED, () => this.bridge.removeAllListeners())
@@ -44,6 +51,14 @@ export class ClientChannel {
   public get id() {
     return this.peerConnection.id
   }
+
+  /**
+   * Get the channel's audio/video tracks
+   */
+  public get tracks(): RTCRtpTransceiver[] {
+    return this.peerConnection.localPeerConnection.getTransceivers()
+  }
+
 
   /** Close the WebRTC connection */
   public close() {
@@ -78,6 +93,14 @@ export class ClientChannel {
     } else {
       this.connectionsManager.emit(eventName, data)
     }
+  }
+
+  /**
+   * Reconnect renegotiates the WebRTC connection so we can retrieve updated video/audio tracks
+   * as new clients join.
+   */
+   async reconnect() {
+    await this.peerConnection.reconnect(this.connectionsManager)
   }
 
   /** Emit a raw message to the server */
@@ -181,6 +204,7 @@ export class ClientChannel {
  * @param options.label The label of the DataChannel. Default: 'geckos.io'.
  * @param options.iceServers An array of RTCIceServers. See https://developer.mozilla.org/en-US/docs/Web/API/RTCIceServer.
  * @param options.iceTransportPolicy RTCIceTransportPolicy enum defines string constants which can be used to limit the transport policies of the ICE candidates to be considered during the connection process.
+ * @param options.stream Client's local MediaStream to use for WebRTC video/audio streaming
  */
 const geckosClient = (options: Types.ClientOptions = {}) => {
   const {
@@ -189,9 +213,10 @@ const geckosClient = (options: Types.ClientOptions = {}) => {
     url = `${location.protocol}//${location.hostname}`,
     authorization = undefined,
     port = 9208,
-    label = 'geckos.io'
+    label = 'geckos.io',
+    stream = undefined,
   } = options
-  return new ClientChannel(url, authorization, port, label, { iceServers, iceTransportPolicy })
+  return new ClientChannel(url, authorization, port, label, { iceServers, iceTransportPolicy }, stream)
 }
 
 export default geckosClient

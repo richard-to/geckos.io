@@ -8,7 +8,8 @@ const EVENTS = {
   ERROR: 'error',
   DATA_CHANNEL_IS_OPEN: 'dataChannelIsOpen',
   RAW_MESSAGE: 'rawMessage',
-  DROP: 'dropped'
+  DROP: 'dropped',
+  ADD_TRACK: 'addTrack',
 }
 
 const ERRORS = {

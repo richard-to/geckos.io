@@ -38,6 +38,19 @@ const HttpServer = (server: http.Server, connectionsManager: ConnectionsManagerS
       const path3 = new RegExp(`${prefix}\/${version}\/connections\/[0-9a-zA-Z]+\/additional-candidates`).test(pathname)
       const closePath = new RegExp(`${prefix}\/${version}\/connections\/[0-9a-zA-Z]+\/close`).test(pathname)
 
+      // Endpoint for renegotiating a WebRTC connection so we can retrieve updated video/audio tracks
+      // as new clients join. We need to hit this endpoint since we want the server to send the initial
+      // offer.
+      const reconnectPath = new RegExp(`${prefix}\/${version}\/connections\/[0-9a-zA-Z]+\/reconnect`).test(pathname)
+
+      // Endpoint for retrieving a map of audio/video streams by client connection ID
+      //
+      // This map is necessary since the server is forwarding audio/video from connected clients to the local
+      // client. This means that we need a way to distinguish which audio/video streams belong to which client.
+      //
+      // This can be done using the track's mid which we can map to the channel's ID
+      const streamsPath = new RegExp(`${prefix}\/${version}\/connections\/[0-9a-zA-Z]+\/streams`).test(pathname)
+
       SetCORS(req, res, cors)
 
       if (req.method === 'OPTIONS') {
@@ -170,6 +183,70 @@ const HttpServer = (server: http.Server, connectionsManager: ConnectionsManagerS
             end(res, 400)
             return
           }
+        } else if (method === 'POST' && reconnectPath) {
+          const ids = pathname.match(/[0-9a-zA-Z]{24}/g)
+          if (ids && ids.length === 1) {
+            const id = ids[0]
+            const connection = connectionsManager.getConnection(id)
+
+            if (!connection) {
+              end(res, 404)
+              return
+            }
+
+            try {
+              await connection.reconnect()
+              let connectionJSON = connection.toJSON()
+              res.write(JSON.stringify(connectionJSON))
+              res.end()
+              return
+            } catch (error) {
+              console.error(error.message)
+              end(res, 400)
+              return
+            }
+          } else {
+            end(res, 400)
+            return
+          }
+        } else if (method === 'POST' && streamsPath) {
+          const ids = pathname.match(/[0-9a-zA-Z]{24}/g)
+          if (ids && ids.length === 1) {
+            const id = ids[0]
+            const myConnection = connectionsManager.getConnection(id)
+
+            if (!myConnection) {
+              end(res, 404)
+              return
+            }
+
+            try {
+              const videoMap = new Map()
+              const audioMap = new Map()
+
+              myConnection.videoMap.forEach((transceiver, channelId) => {
+                videoMap.set(transceiver.mid, channelId)
+              })
+
+              myConnection.audioMap.forEach((transceiver, channelId) => {
+                audioMap.set(transceiver.mid, channelId)
+              })
+
+              res.write(JSON.stringify({
+                audio: Object.fromEntries(audioMap),
+                video: Object.fromEntries(videoMap),
+              }))
+              res.end()
+            } catch (error) {
+              console.error(error.message)
+              end(res, 400)
+              return
+            }
+          } else {
+            end(res, 400)
+            return
+          }
+
         } else {
           end(res, 404)
           return

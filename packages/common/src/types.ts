@@ -12,6 +12,8 @@ export type Payload = { [eventName: string]: Data }
 export type RawMessage = USVString | ArrayBuffer | ArrayBufferView
 
 export interface ServerOptions {
+  enableAudio?: boolean
+  enableVideo?: boolean
   iceServers?: RTCIceServer[]
   iceTransportPolicy?: RTCIceTransportPolicy
   label?: string
@@ -47,6 +49,7 @@ export interface ClientOptions {
   authorization?: string | undefined
   port?: number
   label?: string
+  stream?: MediaStream | undefined
 }
 
 export interface EmitOptions {

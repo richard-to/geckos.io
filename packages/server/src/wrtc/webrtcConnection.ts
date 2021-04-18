@@ -3,6 +3,7 @@ import CreateDataChannel from '../geckos/channel'
 import Channel from '../geckos/channel'
 import { ChannelId, ServerOptions } from '@geckos.io/common/lib/types'
 
+const MediaStream = require('wrtc').MediaStream
 const DefaultRTCPeerConnection: RTCPeerConnection = require('wrtc').RTCPeerConnection
 
 // strangely something it takes a long time
@@ -15,10 +16,27 @@ export default class WebRTCConnection extends Connection {
   public additionalCandidates: RTCIceCandidate[] = []
   private options: any
 
+  // Save the client's audio/video tracks so we can forward them to other clients
+  public audio: RTCRtpTransceiver
+  public video: RTCRtpTransceiver
+
+  // Keep a map of other client's audio/video tracks so that we can correctly match
+  // them up on local clients
+  public audioMap: Map<ChannelId, RTCRtpTransceiver> = new Map()
+  public videoMap: Map<ChannelId, RTCRtpTransceiver> = new Map()
+
+
   constructor(id: ChannelId, serverOptions: ServerOptions, public connections: Map<any, any>, public userData: any) {
     super(id)
 
-    const { iceServers = [], iceTransportPolicy = 'all', portRange, ...dataChannelOptions } = serverOptions
+    const {
+      enableAudio = false,
+      enableVideo = false,
+      iceServers = [],
+      iceTransportPolicy = 'all',
+      portRange,
+      ...dataChannelOptions
+    } = serverOptions
 
     this.options = {
       timeToHostCandidates: TIME_TO_HOST_CANDIDATES
@@ -37,11 +55,77 @@ export default class WebRTCConnection extends Connection {
     // @ts-ignore
     this.peerConnection = new DefaultRTCPeerConnection(configuration)
 
+    this.setupStreams(enableVideo, enableVideo)
+
     this.peerConnection.onconnectionstatechange = () => {
       if (this.peerConnection.connectionState === 'disconnected') this.close()
     }
 
     this.channel = new CreateDataChannel(this, dataChannelOptions, userData)
+  }
+
+  /**
+   * Setup audio/video streams
+   *
+   * The server is connected to multiple clients. The server will
+   * forward audio/video streams to all connected clients.
+   *
+   * The server also needs to ensure that each client knows which
+   * track belongs to which client.
+   *
+   * The track id cannot be used because that will not be the same on
+   * on the server and client.
+   *
+   * The track's mid will be the same on the server and client, so we
+   * will use that.
+   *
+   * The track's mid does not get generated when calling addTransceiver. This
+   * is why we store the transceiver and not just the mid
+   *
+   * @param enableAudio Enables audio streams
+   * @param enableVideo Enables video streams
+   */
+  setupStreams(enableAudio: boolean, enableVideo: boolean) {
+    if (enableVideo) {
+      if (!this.video) {
+        // Video track that we will forward to other tracks
+        this.video = this.peerConnection.addTransceiver('video')
+      }
+
+      this.connections.forEach((theirConnection) => {
+        // Send my video to their client
+        const theirVideo = theirConnection.peerConnection.addTransceiver('video')
+        theirVideo.sender.replaceTrack(this.video.receiver.track)
+        theirConnection.videoMap.set(this.id, theirVideo)
+        // Send their video to my client
+        const myVideo = this.peerConnection.addTransceiver('video')
+        myVideo.sender.replaceTrack(theirConnection.video.receiver.track)
+        if (myVideo.sender.track) {
+          this.videoMap.set(theirConnection.id, myVideo)
+        }
+      })
+    }
+
+    if (enableAudio) {
+      if (!this.audio) {
+        // Audio track that we will forward to other tracks
+        this.audio = this.peerConnection.addTransceiver('audio')
+      }
+
+      this.connections.forEach((theirConnection) => {
+        // Send my audio to their client
+        const theirAudio = theirConnection.peerConnection.addTransceiver('audio')
+        theirAudio.sender.replaceTrack(this.audio.receiver.track)
+        theirConnection.audioMap.set(this.id, theirAudio)
+
+        // Send their audio to my client
+        const myAudio = this.peerConnection.addTransceiver('audio')
+        myAudio.sender.replaceTrack(theirConnection.audio.receiver.track)
+        if (myAudio.sender.track) {
+          this.audioMap.set(theirConnection.id, myAudio)
+        }
+      })
+    }
   }
 
   async doOffer() {
@@ -56,6 +140,19 @@ export default class WebRTCConnection extends Connection {
       throw error
     }
   }
+
+  /**
+   * Reconnect renegotiates the WebRTC connection so we can retrieve updated video/audio tracks
+   * as new clients join.
+   *
+   * Renegotiating a connection requires sending a new offer which should be done by the server
+   * since the signal workflow uses HTTP requests and not WebSockets. This means that the server
+   * wouldn't be able to send requests to the client. The client must send the HTTP requests.
+   */
+  async reconnect() {
+    await this.doOffer()
+  }
+
 
   get iceConnectionState() {
     return this.peerConnection.iceConnectionState

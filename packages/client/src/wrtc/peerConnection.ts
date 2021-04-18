@@ -33,4 +33,12 @@ export default class PeerConnection {
       return { error }
     }
   }
+
+  /**
+   * Reconnect renegotiates the WebRTC connection so we can retrieve updated video/audio tracks
+   * as new clients join.
+   */
+  async reconnect(connectionsManager: ConnectionsManagerClient) {
+    await connectionsManager.reconnect(this.id)
+  }
 }

@@ -1,4 +1,5 @@
 import { Bridge } from '@geckos.io/common/lib/bridge'
+import { EVENTS } from '@geckos.io/common/lib/constants'
 import { RawMessage, Data, ChannelId, EventName } from '@geckos.io/common/lib/types'
 import ParseMessage from '@geckos.io/common/lib/parseMessage'
 import SendMessage from '@geckos.io/common/lib/sendMessage'
@@ -24,8 +25,14 @@ export default class ConnectionsManagerClient {
     public url: string,
     public authorization: string | undefined,
     public label: string,
-    public rtcConfiguration: RTCConfiguration
+    public rtcConfiguration: RTCConfiguration,
+    public stream: MediaStream | undefined,
   ) {}
+
+  onTrack = (ev: RTCTrackEvent) => {
+    // Forward ontrack event to listeners as AddTrack event
+    this.bridge.emit(EVENTS.ADD_TRACK, ev)
+  }
 
   onDataChannel = (ev: RTCDataChannelEvent) => {
     const { channel } = ev
@@ -145,7 +152,15 @@ export default class ConnectionsManagerClient {
 
     try {
       await this.localPeerConnection.setRemoteDescription(localDescription)
+      this.localPeerConnection.addEventListener('track', this.onTrack)
       this.localPeerConnection.addEventListener('datachannel', this.onDataChannel, { once: true })
+
+      // Only add audio/video tracks if stream has been provided
+      if (this.stream) {
+        this.stream.getTracks().forEach(track => (
+          this.localPeerConnection.addTrack(track, this.stream as MediaStream))
+        )
+      }
 
       const originalAnswer = await this.localPeerConnection.createAnswer()
       const updatedAnswer = new RTCSessionDescription({
@@ -186,12 +201,88 @@ export default class ConnectionsManagerClient {
         userData,
         localPeerConnection: this.localPeerConnection,
         dataChannel: this.dataChannel,
-        id: id
+        id: id,
       }
     } catch (error) {
       console.error(error.message)
       this.localPeerConnection.close()
       return { error }
+    }
+  }
+
+  /**
+   * Reconnect renegotiates the WebRTC connection so we can retrieve updated video/audio tracks
+   * as new clients join.
+   */
+  async reconnect(id: ChannelId) {
+    const host = `${this.url}/.wrtc/v1`
+
+    let headers: any = { 'Content-Type': 'application/json' }
+    if (this.authorization) {
+      headers = {
+        ...headers,
+        ['Authorization']: this.authorization,
+      }
+    }
+
+    try {
+      const res = await fetch(`${host}/connections/${id}/reconnect`, {
+        method: 'POST',
+        headers,
+      })
+
+      const json = await res.json()
+
+      this.remotePeerConnection = json
+    } catch (error) {
+      console.error(error.message)
+      return { error }
+    }
+
+    const { localDescription } = this.remotePeerConnection
+
+    // get additional ice candidates
+    // we do still continue to gather candidates even if the connection is established,
+    // maybe we get a better connection.
+    // So the server is still gathering candidates and we ask for them frequently.
+    const showBackOffIntervals = (attempts = 10, initial = 50, factor = 1.8, jitter = 20) =>
+      Array(attempts)
+        .fill(0)
+        .map(
+          (_, index) => parseInt((initial * factor ** index).toString()) + parseInt((Math.random() * jitter).toString())
+        )
+
+    showBackOffIntervals().forEach(ms => {
+      setTimeout(() => {
+        this.fetchAdditionalCandidates(host, id)
+      }, ms)
+    })
+
+    try {
+      await this.localPeerConnection.setRemoteDescription(localDescription)
+
+      const originalAnswer = await this.localPeerConnection.createAnswer()
+      const updatedAnswer = new RTCSessionDescription({
+        type: 'answer',
+        sdp: originalAnswer.sdp,
+      })
+
+      await this.localPeerConnection.setLocalDescription(updatedAnswer)
+
+      try {
+        await fetch(`${host}/connections/${id}/remote-description`, {
+          method: 'POST',
+          body: JSON.stringify(this.localPeerConnection.localDescription),
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        })
+      } catch (error) {
+        console.error(error.message)
+        return { error }
+      }
+    } catch (error) {
+      console.error(error.message)
     }
   }
 }
